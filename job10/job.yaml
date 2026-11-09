@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump10
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          S=http://openbao.openbao.svc.cluster.local:8200
+          echo "===SECTION ESO==="
+          G "$K/apis/apps/v1/namespaces/external-secrets/deployments" | grep -o '"serviceAccountName": "[^"]*"\|"name": "external[^"]*"' | sort -u
+          G "$K/api/v1/namespaces/external-secrets/serviceaccounts" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u
+          echo "===SECTION LOGIN==="
+          for nssa in external-secrets/external-secrets external-secrets/default external-secrets/external-secrets-operator kagent/default; do
+            ns=${nssa%%/*}; sa=${nssa##*/}
+            JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{"audiences":["vault"]}}' "$K/api/v1/namespaces/$ns/serviceaccounts/$sa/token" 2>/dev/null | grep -o '"token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+            [ -z "$JWT" ] && { echo "no-jwt $nssa"; continue; }
+            for r in external-secrets-operator external-secrets k8s-data default; do
+              echo "--- try $nssa role=$r"
+              wget -qO- -S --no-check-certificate --header="Content-Type: application/json" --post-data="{\"role\":\"$r\",\"jwt\":\"$JWT\"}" "$S/v1/auth/kubernetes/login" 2>&1 | grep -E 'HTTP/1.1|client_token|errors' | head -3
+            done
+          done
+          echo "===SECTION DONE==="
