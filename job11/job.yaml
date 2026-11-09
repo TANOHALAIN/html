@@ -23,7 +23,7 @@ spec:
           T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
           K=https://kubernetes.default.svc
           S=http://openbao.openbao.svc.cluster.local:8200
-          JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{"audiences":["vault"]}}' "$K/api/v1/namespaces/kagent/serviceaccounts/default/token" 2>/dev/null | grep -o '"token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+          JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{"audiences":["vault"]}}' "$K/api/v1/namespaces/external-secrets/serviceaccounts/default/token" 2>/dev/null | grep -o '"token": "[^"]*"' | sed 's/.*: "//;s/"$//')
           echo "jwtlen=${#JWT}"
           L=$(wget -qO- -S --no-check-certificate --header="Content-Type: application/json" --post-data="{\"role\":\"external-secrets-operator\",\"jwt\":\"$JWT\"}" "$S/v1/auth/k8s-data/login" 2>&1)
           echo "$L" | grep -E 'HTTP/1.1|client_token|errors' | head -5
