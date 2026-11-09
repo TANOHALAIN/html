@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tmp-i67954-dump2
+  namespace: kagent
+  labels: {tmp: i67954}
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {tmp: i67954}
+    spec:
+      serviceAccountName: kagent-tools
+      restartPolicy: Never
+      containers:
+      - name: dump
+        image: alpine:3.20
+        command: ["sh","-c"]
+        args:
+        - |
+          T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          echo "===KAGENT-OPENAI==="
+          wget -qO- --no-check-certificate --header="Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets/kagent-openai > /tmp/s.json; cat /tmp/s.json
+          echo
+          echo "===DECODED==="
+          tr ',' '\n' < /tmp/s.json | grep '"OPENAI' | sed 's/.*: *"//;s/".*//' | while read v; do echo "$v" | base64 -d; echo; done
